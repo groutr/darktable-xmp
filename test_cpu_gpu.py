@@ -3,6 +3,7 @@ import pathlib
 import os
 import argparse
 import tempfile
+import math
 from skimage.metrics import mean_squared_error, structural_similarity
 from skimage.io import imread
 from skimage import color
@@ -14,7 +15,7 @@ def execute_darktable_cli(input_img, output_img, conf, xmpfn=None):
     dt_cli = ['darktable-cli', str(input_img)]
     if xmpfn is not None:
         dt_cli.append(str(xmpfn))
-    dt_cli.extend([str(output_img), '--width', '2000', '--height', '2000'])
+    dt_cli.extend([str(output_img), '--width', '0', '--height', '0'])
 
     dt_cli.extend(['--core'])
     if conf:
@@ -109,9 +110,16 @@ def main(args):
 def compare_images(img1, img2):
     i1 = imread(img1)
     i2 = imread(img2)
-    rmse = mean_squared_error(i1, i2) ** .5
-    n = np.count_nonzero(~np.isclose(i1, i2))
-    return rmse, n/i1.size
+    i1max = i1.max()
+    i2max = i2.max()
+    assert i1.dtype == i2.dtype
+    bitdepth = math.ceil(math.log2(max(i1max, i2max)))
+
+    i1 = i1.astype(float)/(2**bitdepth)
+    i2 = i2.astype(float)/(2**bitdepth)
+    sq = (i1 - i2) ** 2
+    rmse = np.mean(sq) ** .5
+    return rmse, np.max(sq)
 
 if __name__ == "__main__":
     args_parser = argparse.ArgumentParser()
