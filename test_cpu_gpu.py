@@ -15,7 +15,7 @@ def execute_darktable_cli(input_img, output_img, conf, xmpfn=None):
     dt_cli = ['darktable-cli', str(input_img)]
     if xmpfn is not None:
         dt_cli.append(str(xmpfn))
-    dt_cli.extend([str(output_img), '--width', '0', '--height', '0'])
+    dt_cli.extend([str(output_img), '--width', '1000', '--height', '1000'])
 
     dt_cli.extend(['--core'])
     if conf:
@@ -46,6 +46,33 @@ def read_dt_conf(fn):
             conf.append(L)
     return conf
 
+def darktable_cpu_task(input_image, xmp_file, output_image, dt_conf):
+    # Execute with CPU
+    dt_conf_cpu = ['opencl=false', 'plugins/imageio/storage/disk/overwrite=1']
+    cpu_output = output_image.with_suffix('.cpu.tif')
+    cpu_rv = execute_darktable_cli(input_image, cpu_output, dt_conf + dt_conf_cpu, xmpfn=xmp_file)
+
+    if cpu_rv.returncode == 0:
+        return cpu_output
+    else:
+        print("CPU exited with error")
+        print(cpu_rv)
+        return
+
+
+def darktable_gpu_task(input_image, xmp_file, output_image, dt_conf):
+    # Execute with GPU
+    dt_conf_gpu = ['opencl=true', 'plugins/imageio/storage/disk/overwrite=1']
+    gpu_output = output_image.with_suffix('.gpu.tif')
+    gpu_rv = execute_darktable_cli(input_image, gpu_output, dt_conf + dt_conf_gpu, xmpfn=xmp_file)
+
+    if gpu_rv.returncode == 0:
+        return gpu_output
+    else:
+        print("GPU exited with error")
+        print(gpu_rv)
+        return
+
 def measure_cpu_gpu(input_image, xmp_file, output_image, conf_opts=None, keep_outputs=False):
     if conf_opts is not None:
         dt_conf = read_dt_conf(conf_opts)
@@ -54,23 +81,10 @@ def measure_cpu_gpu(input_image, xmp_file, output_image, conf_opts=None, keep_ou
 
     output_image = pathlib.Path(output_image)
 
-    # Execute with CPU
-    dt_conf_cpu = ['opencl=false', 'plugins/imageio/storage/disk/overwrite=1']
-    cpu_output = output_image.with_suffix('.cpu.tif')
-    cpu_rv = execute_darktable_cli(input_image, cpu_output, dt_conf + dt_conf_cpu, xmpfn=xmp_file)
-
-    # Execute with GPU
-    dt_conf_gpu = ['opencl=true', 'plugins/imageio/storage/disk/overwrite=1']
-    gpu_output = output_image.with_suffix('.gpu.tif')
-    gpu_rv = execute_darktable_cli(input_image, gpu_output, dt_conf + dt_conf_gpu, xmpfn=xmp_file)
-
-    if cpu_rv.returncode > 0:
-        print("CPU exited with error")
-        print(cpu_rv)
-        return
-    if gpu_rv.returncode > 0:
-        print("GPU exited with error")
-        print(gpu_rv)
+    args = (input_image, xmp_file, output_image, dt_conf)
+    cpu_output = darktable_cpu_task(*args)
+    gpu_output = darktable_gpu_task(*args)
+    if cpu_output is None or gpu_output is None:
         return
 
     rmse = compare_images(cpu_output, gpu_output)
@@ -107,19 +121,50 @@ def main(args):
         print(f"{args.input_image}: {rmse} {ne}")
 
 
-def compare_images(img1, img2):
+def compare_images(img1, img2, bitdepth=None):
+    """Score two images
+
+    Arguments:
+        img1 (ndarray): a 2 or 3 ndim image
+        img2 (ndarray): a 2 or 3 ndim image
+        bitdepth (int): bitdepth of the image
+
+    Returns:
+        (tuple): RMSE and max squared error
+
+    Notes:
+        This function computes and returns the RMSE score of two images.
+        It also returns the magnitude of the largest squared error.
+
+        The interpretation is as follows:
+            1. If the RMSE is high, but the largest squared error is small, then the RMSE is a
+            measure of many small accumulated errors.  Differeces may not be visible.
+            2. If the RMSe is small, but the largest squared error is large.
+
+        The range of the RMSE score is [0, 1].  It is normalized by the bitdepth of the image.
+        Values closer to 0 are desired and a value of 1 signifies the great possible difference.
+    """
     i1 = imread(img1)
     i2 = imread(img2)
-    i1max = i1.max()
-    i2max = i2.max()
-    assert i1.dtype == i2.dtype
-    bitdepth = math.ceil(math.log2(max(i1max, i2max)))
+    # Make sure each image is same size
+    assert i1.shape == i2.shape
+
+    if bitdepth is None:
+        # Estimate the bitdepth.
+        # This could be error prone depending on the input
+        i1bd = _bitdepth(i1.max())
+        i2bd = _bitdepth(i2.max())
+        assert i1bd == i2bd
+        bitdepth = i1bd
 
     i1 = i1.astype(float)/(2**bitdepth)
     i2 = i2.astype(float)/(2**bitdepth)
     sq = (i1 - i2) ** 2
     rmse = np.mean(sq) ** .5
     return rmse, np.max(sq)
+
+def _bitdepth(max_value):
+    return math.ceil(math.log2(max_value))
 
 if __name__ == "__main__":
     args_parser = argparse.ArgumentParser()
